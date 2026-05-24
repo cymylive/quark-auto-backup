@@ -5,9 +5,10 @@ sources:
   include: []
   recursive: true
   delete_after_backup: true
-schedule: 每天 02:00
+schedule: 每 1 分钟
 schedule_enabled: true
 remote_root: /自动备份
+backup_log_path: C:/Users/Cymylive/Desktop/备份记录.xlsx
 retry:
   max_retries: 3
   retry_delay: 10

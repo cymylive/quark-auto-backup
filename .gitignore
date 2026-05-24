@@ -6,7 +6,9 @@ cache/*.json
 backup.log
 venv/
 .venv/
-
 config/*.json
-
-Æô¶¯Æ÷.bat
+å¯åŠ¨å™¨.bat
+dist/
+build/
+*.spec
+entry.py

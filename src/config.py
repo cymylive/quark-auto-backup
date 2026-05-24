@@ -29,6 +29,7 @@ class AppConfig(BaseModel):
     schedule: str = "每天 02:00"
     schedule_enabled: bool = True
     remote_root: str = "/自动备份"
+    backup_log_path: str = "data.xlsx"
     retry: RetryConfig = Field(default_factory=RetryConfig)
     concurrency: ConcurrencyConfig = Field(default_factory=ConcurrencyConfig)
     log_level: str = "INFO"

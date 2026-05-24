@@ -14,10 +14,12 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional
 from tkinter import filedialog, messagebox
+import schedule
 
 import customtkinter as ctk
-from PIL import Image
+from PIL import Image, ImageDraw
 import qrcode
+import pystray
 
 from src.auth import get_quark_client, ensure_remote_dirs
 from src.backup import QuarkBackup
@@ -64,13 +66,19 @@ class App(ctk.CTk):
         self.client: Optional["QuarkClient"] = None
         self.backup_thread: Optional[BackupThread] = None
         self.backup_results: list = []
-        self.schedule_active = False
+        self._scheduler_stop = threading.Event()
+        self._scheduler_thread: Optional[threading.Thread] = None
 
         self._build_ui()
         self._login_notified = False
+        self._tray_icon = None
 
         self.after(500, self._try_auto_login)
+        self.after(1000, self._start_scheduler_if_enabled)
+        self.after(1500, self._init_tray)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.bind("<Control-h>", lambda e: self._toggle_window())
+        self.bind("<Control-H>", lambda e: self._toggle_window())
 
     def _load_config(self) -> Optional[AppConfig]:
         try:
@@ -85,6 +93,7 @@ class App(ctk.CTk):
             "schedule": self.config.schedule if self.config else "每天 02:00",
             "schedule_enabled": self.config.schedule_enabled if self.config else True,
             "remote_root": self.config.remote_root if self.config else "/自动备份",
+            "backup_log_path": self.config.backup_log_path if self.config else "data.xlsx",
             "retry": {"max_retries": 3, "retry_delay": 10},
             "concurrency": {"max_upload_workers": 3},
             "log_level": "INFO",
@@ -307,9 +316,42 @@ class App(ctk.CTk):
 
     # ── Settings ────────────────────────────────────────────
 
-    def _apply_schedule_preset(self, preset):
+    def _update_schedule_text(self, *_):
+        freq = self.schedule_freq_var.get()
+        if freq == "每天":
+            h = self.schedule_hour_var.get()
+            m = self.schedule_min_var.get()
+            text = f"每天 {h}:{m}"
+        elif freq == "每小时":
+            text = "每小时"
+        elif freq == "每 N":
+            n = self.schedule_interval_var.get().strip()
+            u = self.schedule_unit_var.get()
+            if n and n.isdigit():
+                text = f"每 {n} {u}"
+            else:
+                text = self.setting_schedule.get()
+        elif freq == "每周":
+            w = self.schedule_weekday_var.get()
+            h = self.schedule_hour_var.get()
+            m = self.schedule_min_var.get()
+            text = f"每周{w} {h}:{m}"
+        else:
+            text = self.setting_schedule.get()
         self.setting_schedule.delete(0, "end")
-        self.setting_schedule.insert(0, preset)
+        self.setting_schedule.insert(0, text)
+
+    def _show_custom_schedule(self, *_):
+        freq = self.schedule_freq_var.get()
+        self.schedule_daily_frame.grid_remove()
+        self.schedule_interval_frame.grid_remove()
+        self.schedule_weekly_frame.grid_remove()
+        if freq == "每天":
+            self.schedule_daily_frame.grid()
+        elif freq == "每 N":
+            self.schedule_interval_frame.grid()
+        elif freq == "每周":
+            self.schedule_weekly_frame.grid()
 
     def _build_settings(self):
         self.tab_settings.grid_columnconfigure(0, weight=1)
@@ -330,24 +372,93 @@ class App(ctk.CTk):
         self.setting_schedule.insert(0, self.config.schedule if self.config else "每天 02:00")
         self.setting_schedule.grid(row=2, column=1, padx=10, pady=5, sticky="w")
 
-        preset_frame = ctk.CTkFrame(f, fg_color="transparent")
-        preset_frame.grid(row=3, column=1, padx=10, pady=(0, 5), sticky="w")
-        presets = ["每天 02:00", "每天 08:00", "每小时", "每 30 分钟", "每周一 03:00"]
-        for p in presets:
-            ctk.CTkButton(preset_frame, text=p, width=90, height=24, font=("", 10),
-                          command=lambda s=p: self._apply_schedule_preset(s)).pack(side="left", padx=2)
+        # Frequency selector
+        ctk.CTkLabel(f, text="备份频率:").grid(row=3, column=0, padx=10, pady=5, sticky="w")
+        self.schedule_freq_var = ctk.StringVar(value="每天")
+        self.schedule_freq_var.trace_add("write", self._show_custom_schedule)
+        freq_menu = ctk.CTkOptionMenu(f, values=["每天", "每小时", "每 N", "每周"],
+                                       variable=self.schedule_freq_var,
+                                       command=lambda _: (self._show_custom_schedule(), self._update_schedule_text()))
+        freq_menu.grid(row=3, column=1, padx=10, pady=5, sticky="w")
 
-        ctk.CTkLabel(f, text="远程根目录:").grid(row=4, column=0, padx=10, pady=5, sticky="w")
+        # Daily frame: hour + minute
+        self.schedule_daily_frame = ctk.CTkFrame(f, fg_color="transparent")
+        self.schedule_daily_frame.grid(row=4, column=1, padx=10, pady=2, sticky="w")
+        ctk.CTkLabel(self.schedule_daily_frame, text="时间:").pack(side="left", padx=2)
+        self.schedule_hour_var = ctk.StringVar(value="02")
+        self.schedule_min_var = ctk.StringVar(value="00")
+        hours = [f"{i:02d}" for i in range(24)]
+        mins = [f"{i:02d}" for i in range(60)]
+        ctk.CTkOptionMenu(self.schedule_daily_frame, values=hours, variable=self.schedule_hour_var,
+                          width=60, command=lambda _: self._update_schedule_text()).pack(side="left", padx=2)
+        ctk.CTkLabel(self.schedule_daily_frame, text=":").pack(side="left")
+        ctk.CTkOptionMenu(self.schedule_daily_frame, values=mins, variable=self.schedule_min_var,
+                          width=60, command=lambda _: self._update_schedule_text()).pack(side="left", padx=2)
+
+        # Interval frame: number + unit
+        self.schedule_interval_frame = ctk.CTkFrame(f, fg_color="transparent")
+        self.schedule_interval_frame.grid(row=4, column=1, padx=10, pady=2, sticky="w")
+        self.schedule_interval_frame.grid_remove()
+        ctk.CTkLabel(self.schedule_interval_frame, text="每").pack(side="left", padx=2)
+        self.schedule_interval_var = ctk.StringVar(value="30")
+        ctk.CTkEntry(self.schedule_interval_frame, textvariable=self.schedule_interval_var, width=60).pack(side="left", padx=2)
+        self.schedule_unit_var = ctk.StringVar(value="分钟")
+        units = ["分钟", "小时", "秒"]
+        ctk.CTkOptionMenu(self.schedule_interval_frame, values=units, variable=self.schedule_unit_var,
+                          width=60, command=lambda _: self._update_schedule_text()).pack(side="left", padx=2)
+        ctk.CTkButton(self.schedule_interval_frame, text="确定", width=40, height=24, font=("", 10),
+                       command=self._update_schedule_text).pack(side="left", padx=5)
+
+        # Weekly frame: weekday + time
+        self.schedule_weekly_frame = ctk.CTkFrame(f, fg_color="transparent")
+        self.schedule_weekly_frame.grid(row=4, column=1, padx=10, pady=2, sticky="w")
+        self.schedule_weekly_frame.grid_remove()
+        weekdays = ["一", "二", "三", "四", "五", "六", "日"]
+        self.schedule_weekday_var = ctk.StringVar(value="一")
+        ctk.CTkLabel(self.schedule_weekly_frame, text="每周").pack(side="left", padx=2)
+        ctk.CTkOptionMenu(self.schedule_weekly_frame, values=weekdays, variable=self.schedule_weekday_var,
+                          width=50, command=lambda _: self._update_schedule_text()).pack(side="left", padx=2)
+        ctk.CTkLabel(self.schedule_weekly_frame, text=" ").pack(side="left")
+        ctk.CTkOptionMenu(self.schedule_weekly_frame, values=hours, variable=self.schedule_hour_var,
+                          width=60, command=lambda _: self._update_schedule_text()).pack(side="left", padx=2)
+        ctk.CTkLabel(self.schedule_weekly_frame, text=":").pack(side="left")
+        ctk.CTkOptionMenu(self.schedule_weekly_frame, values=mins, variable=self.schedule_min_var,
+                          width=60, command=lambda _: self._update_schedule_text()).pack(side="left", padx=2)
+
+        # Preset buttons
+        ctk.CTkLabel(f, text="快捷预设:").grid(row=5, column=0, padx=10, pady=(8, 5), sticky="w")
+        preset_frame = ctk.CTkFrame(f, fg_color="transparent")
+        preset_frame.grid(row=5, column=1, padx=10, pady=(8, 5), sticky="w")
+        presets = [("每天 02:00", lambda: self._apply_preset("每天", {"h":"02","m":"00"})),
+                   ("每天 08:00", lambda: self._apply_preset("每天", {"h":"08","m":"00"})),
+                   ("每小时", lambda: self._apply_preset("每小时", {})),
+                   ("每 30 分钟", lambda: self._apply_preset("每 N", {"n":"30","u":"分钟"})),
+                   ("每周一 03:00", lambda: self._apply_preset("每周", {"w":"一","h":"03","m":"00"}))]
+        for txt, cmd in presets:
+            ctk.CTkButton(preset_frame, text=txt, width=90, height=24, font=("", 10),
+                          command=cmd).pack(side="left", padx=2)
+
+        ctk.CTkLabel(f, text="远程根目录:").grid(row=6, column=0, padx=10, pady=5, sticky="w")
         self.setting_root = ctk.CTkEntry(f, width=250)
         self.setting_root.insert(0, self.config.remote_root if self.config else "/自动备份")
-        self.setting_root.grid(row=4, column=1, padx=10, pady=5, sticky="w")
+        self.setting_root.grid(row=6, column=1, padx=10, pady=5, sticky="w")
 
-        ctk.CTkLabel(f, text="并发上传数:").grid(row=5, column=0, padx=10, pady=5, sticky="w")
+        ctk.CTkLabel(f, text="并发上传数:").grid(row=7, column=0, padx=10, pady=5, sticky="w")
         self.setting_concurrency = ctk.CTkEntry(f, width=100)
         self.setting_concurrency.insert(0, str(self.config.concurrency.max_upload_workers) if self.config else "3")
-        self.setting_concurrency.grid(row=5, column=1, padx=10, pady=5, sticky="w")
+        self.setting_concurrency.grid(row=7, column=1, padx=10, pady=5, sticky="w")
 
-        ctk.CTkButton(f, text="保存设置", command=self._save_settings).grid(row=6, column=1, padx=10, pady=15, sticky="w")
+        ctk.CTkLabel(f, text="备份记录路径:").grid(row=8, column=0, padx=10, pady=5, sticky="w")
+        log_frame = ctk.CTkFrame(f, fg_color="transparent")
+        log_frame.grid(row=8, column=1, padx=10, pady=5, sticky="w")
+        log_frame.grid_columnconfigure(0, weight=1)
+        self.setting_logpath = ctk.CTkEntry(log_frame, width=350)
+        self.setting_logpath.insert(0, self.config.backup_log_path if self.config else "data.xlsx")
+        self.setting_logpath.pack(side="left", padx=(0, 5))
+        ctk.CTkButton(log_frame, text="浏览...", width=60, height=28, font=("", 10),
+                       command=self._browse_log_path).pack(side="left")
+
+        ctk.CTkButton(f, text="保存设置", command=self._save_settings).grid(row=9, column=1, padx=10, pady=15, sticky="w")
 
         g = ctk.CTkFrame(self.tab_settings)
         g.grid(row=1, column=0, padx=20, pady=20, sticky="ew")
@@ -355,14 +466,63 @@ class App(ctk.CTk):
         ctk.CTkLabel(g, text="缓存管理", font=("", 16, "bold")).grid(row=0, column=0, columnspan=2, pady=(5, 15))
         ctk.CTkButton(g, text="清除缓存（重置增量备份）", command=self._clear_cache).grid(row=1, column=1, padx=10, pady=5, sticky="w")
 
+        # Restore previous schedule setting
+        self._restore_schedule_ui()
+
+    def _restore_schedule_ui(self):
+        if not self.config:
+            return
+        s = self.config.schedule
+        if s.startswith("每天"):
+            self.schedule_freq_var.set("每天")
+            parts = s.split()
+            if len(parts) >= 2 and ":" in parts[1]:
+                h, m = parts[1].split(":")
+                self.schedule_hour_var.set(h)
+                self.schedule_min_var.set(m)
+        elif s == "每小时":
+            self.schedule_freq_var.set("每小时")
+        elif s.startswith("每") and any(u in s for u in ["分钟", "小时", "秒"]):
+            self.schedule_freq_var.set("每 N")
+            import re
+            for unit in ["小时", "分钟", "秒"]:
+                m = re.search(rf"每\s*(\d+)\s*{unit}", s)
+                if m:
+                    self.schedule_interval_var.set(m.group(1))
+                    self.schedule_unit_var.set(unit)
+                    break
+        elif s.startswith("每周"):
+            self.schedule_freq_var.set("每周")
+            import re
+            m = re.search(r"每周([一二三四五六日])\s*(\d{1,2}):(\d{2})", s)
+            if m:
+                self.schedule_weekday_var.set(m.group(1))
+                self.schedule_hour_var.set(m.group(2))
+                self.schedule_min_var.set(m.group(3))
+        self._show_custom_schedule()
+        self._update_schedule_text()
+
+    def _apply_preset(self, freq, params):
+        self.schedule_freq_var.set(freq)
+        if freq == "每天":
+            self.schedule_hour_var.set(params.get("h", "02"))
+            self.schedule_min_var.set(params.get("m", "00"))
+        elif freq == "每小时":
+            pass
+        elif freq == "每 N":
+            self.schedule_interval_var.set(params.get("n", "30"))
+            self.schedule_unit_var.set(params.get("u", "分钟"))
+        elif freq == "每周":
+            self.schedule_weekday_var.set(params.get("w", "一"))
+            self.schedule_hour_var.set(params.get("h", "03"))
+            self.schedule_min_var.set(params.get("m", "00"))
+        self._show_custom_schedule()
+        self._update_schedule_text()
+
     def _on_schedule_toggle(self):
         state = "normal" if self.schedule_enabled_var.get() else "disabled"
         self.setting_schedule.configure(state=state)
-        for child in self.setting_schedule.master.winfo_children():
-            if isinstance(child, ctk.CTkFrame):
-                for btn in child.winfo_children():
-                    if isinstance(btn, ctk.CTkButton):
-                        btn.configure(state=state)
+        self.schedule_freq_var.set("每天")
 
     def _save_settings(self):
         if not self.config:
@@ -370,14 +530,33 @@ class App(ctk.CTk):
         self.config.schedule = self.setting_schedule.get()
         self.config.schedule_enabled = self.schedule_enabled_var.get()
         self.config.remote_root = self.setting_root.get()
+        self.config.backup_log_path = self.setting_logpath.get()
         try:
             self.config.concurrency.max_upload_workers = int(self.setting_concurrency.get())
         except ValueError:
             pass
         self._save_yaml()
-        status = self.config.schedule if self.config.schedule_enabled else "已禁用"
-        self.dash_schedule_info.configure(text=status)
+        if self.config.schedule_enabled:
+            self._start_scheduler()
+            self.dash_schedule_info.configure(text=f"{self.config.schedule} (运行中)")
+        else:
+            self._stop_scheduler()
+            self.dash_schedule_info.configure(text="已禁用")
         messagebox.showinfo("已保存", "设置已保存")
+
+    def _browse_log_path(self):
+        from tkinter import filedialog
+        path = filedialog.asksaveasfilename(
+            title="选择备份记录文件",
+            defaultextension=".xlsx",
+            filetypes=[("Excel 文件", "*.xlsx"), ("所有文件", "*.*")],
+            initialfile="备份记录",
+        )
+        if path:
+            if not path.endswith(".xlsx"):
+                path += ".xlsx"
+            self.setting_logpath.delete(0, "end")
+            self.setting_logpath.insert(0, path)
 
     def _clear_cache(self):
         if messagebox.askyesno("确认", "清除缓存后，下次备份将重新上传所有文件。确定继续？"):
@@ -521,14 +700,92 @@ class App(ctk.CTk):
             except Exception:
                 pass
 
-    # ── Misc ────────────────────────────────────────────────
+    # ── Tray ────────────────────────────────────────────────
+
+    def _init_tray(self):
+        img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        draw.rounded_rectangle([4, 4, 60, 60], radius=12, fill="#4472C4")
+        draw.ellipse([18, 12, 46, 40], fill="white")
+        draw.polygon([(22, 34), (46, 46), (22, 58)], fill="white")
+        menu = (
+            pystray.MenuItem("显示/隐藏  Ctrl+H", lambda: self.after(0, self._toggle_window)),
+            pystray.MenuItem("退出", lambda: self.after(0, self._quit_app)),
+        )
+        self._tray_icon = pystray.Icon("quark-backup", img, "夸克自动备份", menu)
+        threading.Thread(target=self._tray_icon.run, daemon=True).start()
+
+    def _toggle_window(self):
+        if self.state() == "normal" and self.winfo_viewable():
+            self.withdraw()
+        else:
+            self.deiconify()
+            self.lift()
+            self.focus_force()
+
+    def _quit_app(self):
+        self._stop_scheduler()
+        if self._tray_icon:
+            self._tray_icon.stop()
+        self.quit()
+        self.destroy()
 
     def _on_close(self):
         if self.backup_thread and self.backup_thread.is_alive():
             if not messagebox.askokcancel("确认退出", "备份正在进行，确定退出？"):
                 return
-        self.destroy()
+        self.withdraw()
 
+    # ── Scheduler ───────────────────────────────────────────
+
+    def _start_scheduler_if_enabled(self):
+        if self.config and self.config.schedule_enabled:
+            self._start_scheduler()
+
+    def _start_scheduler(self):
+        self._stop_scheduler()
+        if not self.config:
+            return
+        self._scheduler_stop.clear()
+        desc = self.config.schedule
+        from src.scheduler import parse_schedule
+        try:
+            kind, value = parse_schedule(desc)
+            schedule.clear()
+            if kind == "seconds":
+                schedule.every(value).seconds.do(self._scheduler_tick)
+            elif kind == "minutes":
+                schedule.every(value).minutes.do(self._scheduler_tick)
+            elif kind == "hours":
+                schedule.every(value).hours.do(self._scheduler_tick)
+            elif kind == "daily":
+                schedule.every().day.at(value).do(self._scheduler_tick)
+            elif kind in ("monday","tuesday","wednesday","thursday","friday","saturday","sunday"):
+                getattr(schedule.every(), kind).at(value).do(self._scheduler_tick)
+            self._scheduler_thread = threading.Thread(target=self._scheduler_loop, daemon=True)
+            self._scheduler_thread.start()
+            self.dash_schedule_info.configure(text=f"{desc} (运行中)")
+        except Exception as e:
+            self.dash_schedule_info.configure(text=f"调度配置错误: {e}")
+
+    def _stop_scheduler(self):
+        self._scheduler_stop.set()
+        schedule.clear()
+
+    def _scheduler_loop(self):
+        while not self._scheduler_stop.is_set():
+            schedule.run_pending()
+            time.sleep(1)
+
+    def _scheduler_tick(self):
+        if not self.client or not self.config or not self.config.sources:
+            return
+        if self.backup_thread and self.backup_thread.is_alive():
+            return
+        self.after(0, lambda: self.backup_status.configure(text="定时备份触发..."))
+        if self.client:
+            t = BackupThread(self, self.client, self.config)
+            t.start()
 
 class QrLoginDialog(ctk.CTkToplevel):
     def __init__(self, parent):
