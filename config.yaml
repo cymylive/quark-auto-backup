@@ -1,0 +1,14 @@
+sources:
+- local: C:/Users/Cymylive/Desktop/新建文件夹 (3)
+  remote: 夸克快传
+  exclude: []
+  include: []
+  recursive: true
+schedule: 每天 02:00
+remote_root: /自动备份
+retry:
+  max_retries: 3
+  retry_delay: 10
+concurrency:
+  max_upload_workers: 3
+log_level: INFO

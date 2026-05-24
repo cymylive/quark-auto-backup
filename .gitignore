@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+cache/*.json
+config/*.json
+backup.log
+venv/
+.venv/
+gui_error.log
