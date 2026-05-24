@@ -12,6 +12,7 @@ class SourceConfig(BaseModel):
     exclude: List[str] = Field(default_factory=list)
     include: List[str] = Field(default_factory=list)
     recursive: bool = True
+    delete_after_backup: bool = False
 
 
 class RetryConfig(BaseModel):
@@ -26,6 +27,7 @@ class ConcurrencyConfig(BaseModel):
 class AppConfig(BaseModel):
     sources: List[SourceConfig]
     schedule: str = "每天 02:00"
+    schedule_enabled: bool = True
     remote_root: str = "/自动备份"
     retry: RetryConfig = Field(default_factory=RetryConfig)
     concurrency: ConcurrencyConfig = Field(default_factory=ConcurrencyConfig)

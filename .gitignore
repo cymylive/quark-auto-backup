@@ -3,8 +3,10 @@ __pycache__/
 *.pyo
 .env
 cache/*.json
-config/*.json
 backup.log
 venv/
 .venv/
-gui_error.log
+
+config/*.json
+
+Æô¶¯Æ÷.bat

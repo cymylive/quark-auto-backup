@@ -123,6 +123,8 @@ class QuarkUploader:
         if progress_callback:
             progress_callback(15, "获取上传授权...")
 
+        # Always use single-part upload (OSS supports up to 5GB)
+        # Multipart upload requires x-oss-hash-ctx for parts 2+ which is unreliable
         result = self._upload_single(fp, pre, mime_type, progress_callback)
 
         if progress_callback:

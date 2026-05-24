@@ -137,6 +137,14 @@ class QuarkBackup:
                         cache_key = f"{source.remote}/{rel}"
                         self.cache[cache_key] = _file_hash(lf)
                         uploaded += 1
+                        if source.delete_after_backup:
+                            try:
+                                lf.unlink()
+                                if progress_callback:
+                                    progress_callback("status", f"已删除: {lf.name}", None)
+                            except Exception as del_e:
+                                if progress_callback:
+                                    progress_callback("status", f"删除失败: {lf.name} - {del_e}", None)
                     else:
                         failed += 1
                 except Exception as e:

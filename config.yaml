@@ -1,10 +1,12 @@
 sources:
-- local: C:/Users/Cymylive/Desktop/新建文件夹 (3)
+- local: C:/Users/Cymylive/Desktop/新建文件夹 (2)
   remote: 夸克快传
   exclude: []
   include: []
   recursive: true
+  delete_after_backup: true
 schedule: 每天 02:00
+schedule_enabled: true
 remote_root: /自动备份
 retry:
   max_retries: 3

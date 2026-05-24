@@ -83,6 +83,7 @@ class App(ctk.CTk):
         data = {
             "sources": [s.model_dump() for s in self.config.sources] if self.config else [],
             "schedule": self.config.schedule if self.config else "每天 02:00",
+            "schedule_enabled": self.config.schedule_enabled if self.config else True,
             "remote_root": self.config.remote_root if self.config else "/自动备份",
             "retry": {"max_retries": 3, "retry_delay": 10},
             "concurrency": {"max_upload_workers": 3},
@@ -136,9 +137,12 @@ class App(ctk.CTk):
         self.dash_btn.grid(row=6, column=0, pady=15)
 
         ctk.CTkLabel(self.dash_frame, text="定时备份", font=("", 18, "bold")).grid(row=7, column=0, pady=(20, 5))
+        sched_text = self.config.schedule if self.config else "未设置"
+        if self.config and not self.config.schedule_enabled:
+            sched_text += " (已禁用)"
         self.dash_schedule_info = ctk.CTkLabel(
             self.dash_frame,
-            text=self.config.schedule if self.config else "未设置",
+            text=sched_text,
             font=("", 13),
         )
         self.dash_schedule_info.grid(row=8, column=0, pady=5)
@@ -303,6 +307,10 @@ class App(ctk.CTk):
 
     # ── Settings ────────────────────────────────────────────
 
+    def _apply_schedule_preset(self, preset):
+        self.setting_schedule.delete(0, "end")
+        self.setting_schedule.insert(0, preset)
+
     def _build_settings(self):
         self.tab_settings.grid_columnconfigure(0, weight=1)
 
@@ -312,25 +320,34 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(f, text="定时备份", font=("", 16, "bold")).grid(row=0, column=0, columnspan=2, pady=(5, 15))
 
-        ctk.CTkLabel(f, text="调度计划:").grid(row=1, column=0, padx=10, pady=5, sticky="w")
+        self.schedule_enabled_var = ctk.BooleanVar(value=self.config.schedule_enabled if self.config else True)
+        self.schedule_switch = ctk.CTkSwitch(f, text="启用定时备份", variable=self.schedule_enabled_var,
+                                              command=self._on_schedule_toggle)
+        self.schedule_switch.grid(row=1, column=0, columnspan=2, padx=10, pady=5, sticky="w")
+
+        ctk.CTkLabel(f, text="调度计划:").grid(row=2, column=0, padx=10, pady=5, sticky="w")
         self.setting_schedule = ctk.CTkEntry(f, width=250)
         self.setting_schedule.insert(0, self.config.schedule if self.config else "每天 02:00")
-        self.setting_schedule.grid(row=1, column=1, padx=10, pady=5, sticky="w")
+        self.setting_schedule.grid(row=2, column=1, padx=10, pady=5, sticky="w")
 
-        ctk.CTkLabel(f, text="\u793a\u4f8b: \u6bcf\u5929 02:00 / \u6bcf\u5c0f\u65f6 / \u6bcf 30 \u5206\u949f",
-                     font=("", 10)).grid(row=2, column=1, padx=10, sticky="w")
+        preset_frame = ctk.CTkFrame(f, fg_color="transparent")
+        preset_frame.grid(row=3, column=1, padx=10, pady=(0, 5), sticky="w")
+        presets = ["每天 02:00", "每天 08:00", "每小时", "每 30 分钟", "每周一 03:00"]
+        for p in presets:
+            ctk.CTkButton(preset_frame, text=p, width=90, height=24, font=("", 10),
+                          command=lambda s=p: self._apply_schedule_preset(s)).pack(side="left", padx=2)
 
-        ctk.CTkLabel(f, text="远程根目录:").grid(row=3, column=0, padx=10, pady=5, sticky="w")
+        ctk.CTkLabel(f, text="远程根目录:").grid(row=4, column=0, padx=10, pady=5, sticky="w")
         self.setting_root = ctk.CTkEntry(f, width=250)
         self.setting_root.insert(0, self.config.remote_root if self.config else "/自动备份")
-        self.setting_root.grid(row=3, column=1, padx=10, pady=5, sticky="w")
+        self.setting_root.grid(row=4, column=1, padx=10, pady=5, sticky="w")
 
-        ctk.CTkLabel(f, text="并发上传数:").grid(row=4, column=0, padx=10, pady=5, sticky="w")
+        ctk.CTkLabel(f, text="并发上传数:").grid(row=5, column=0, padx=10, pady=5, sticky="w")
         self.setting_concurrency = ctk.CTkEntry(f, width=100)
         self.setting_concurrency.insert(0, str(self.config.concurrency.max_upload_workers) if self.config else "3")
-        self.setting_concurrency.grid(row=4, column=1, padx=10, pady=5, sticky="w")
+        self.setting_concurrency.grid(row=5, column=1, padx=10, pady=5, sticky="w")
 
-        ctk.CTkButton(f, text="保存设置", command=self._save_settings).grid(row=5, column=1, padx=10, pady=15, sticky="w")
+        ctk.CTkButton(f, text="保存设置", command=self._save_settings).grid(row=6, column=1, padx=10, pady=15, sticky="w")
 
         g = ctk.CTkFrame(self.tab_settings)
         g.grid(row=1, column=0, padx=20, pady=20, sticky="ew")
@@ -338,17 +355,28 @@ class App(ctk.CTk):
         ctk.CTkLabel(g, text="缓存管理", font=("", 16, "bold")).grid(row=0, column=0, columnspan=2, pady=(5, 15))
         ctk.CTkButton(g, text="清除缓存（重置增量备份）", command=self._clear_cache).grid(row=1, column=1, padx=10, pady=5, sticky="w")
 
+    def _on_schedule_toggle(self):
+        state = "normal" if self.schedule_enabled_var.get() else "disabled"
+        self.setting_schedule.configure(state=state)
+        for child in self.setting_schedule.master.winfo_children():
+            if isinstance(child, ctk.CTkFrame):
+                for btn in child.winfo_children():
+                    if isinstance(btn, ctk.CTkButton):
+                        btn.configure(state=state)
+
     def _save_settings(self):
         if not self.config:
             return
         self.config.schedule = self.setting_schedule.get()
+        self.config.schedule_enabled = self.schedule_enabled_var.get()
         self.config.remote_root = self.setting_root.get()
         try:
             self.config.concurrency.max_upload_workers = int(self.setting_concurrency.get())
         except ValueError:
             pass
         self._save_yaml()
-        self.dash_schedule_info.configure(text=self.config.schedule)
+        status = self.config.schedule if self.config.schedule_enabled else "已禁用"
+        self.dash_schedule_info.configure(text=status)
         messagebox.showinfo("已保存", "设置已保存")
 
     def _clear_cache(self):
@@ -407,9 +435,54 @@ class App(ctk.CTk):
                     self.client = QuarkClient(cookies=cookie_string, auto_login=False)
                     self.after(0, self._update_dashboard)
                     return
+                # Cookie 格式不完整，尝试刷新
+                if self._try_refresh_cookies(auth):
+                    return
+        except Exception:
+            pass
+        # Cookie 过期，尝试用 service_ticket 刷新
+        try:
+            if self._try_refresh_cookies():
+                return
         except Exception:
             pass
         self.after(0, lambda: self.dash_btn.configure(state="normal", text="立即登录"))
+
+    def _try_refresh_cookies(self, auth=None):
+        import json, httpx
+        from quark_client.config import get_config_dir
+        from quark_client.auth.login import QuarkAuth
+        lf = get_config_dir() / 'login_result.json'
+        if not lf.exists():
+            return False
+        with open(lf, 'r', encoding='utf-8') as f:
+            result = json.load(f)
+        st = result.get('data', {}).get('members', {}).get('service_ticket')
+        if not st:
+            return False
+        try:
+            client = httpx.Client(timeout=30.0, follow_redirects=True)
+            resp = client.get('https://pan.quark.cn/account/info', params={'st': st, 'lw': 'scan'})
+            if resp.status_code == 200:
+                cookie_dicts = []
+                for c in client.cookies.jar:
+                    if c.domain and 'quark.cn' in c.domain:
+                        cookie_dicts.append({
+                            'name': c.name, 'value': c.value,
+                            'domain': c.domain, 'path': c.path or '/',
+                            'expires': int(c.expires) if c.expires else 0,
+                        })
+                if cookie_dicts:
+                    qa = auth or QuarkAuth()
+                    qa._save_cookies(cookie_dicts)
+                    from quark_client import QuarkClient
+                    cs = qa._cookies_to_string(cookie_dicts)
+                    self.client = QuarkClient(cookies=cs, auto_login=False)
+                    self.after(0, self._update_dashboard)
+                    return True
+        except Exception:
+            pass
+        return False
 
     def _login(self):
         if self.client is not None:
@@ -534,9 +607,7 @@ class QrLoginDialog(ctk.CTkToplevel):
                         if cookie.domain and 'quark.cn' in cookie.domain:
                             cookies.append(f"{cookie.name}={cookie.value}")
                     self.cookie_string = "; ".join(cookies)
-
                     self._save_cookies_persistent(api)
-
                     self.after(500, self.destroy)
                     return
 
@@ -551,6 +622,16 @@ class QrLoginDialog(ctk.CTkToplevel):
         except Exception as e:
             self.after(0, lambda: self.status_label.configure(text=f"错误: {e}", text_color="red"))
             self.after(0, lambda: self.qr_label.configure(image="", text="加载失败"))
+
+    def _open_browser(self):
+        import webbrowser
+        if self._api_login:
+            _, qr_url = self._api_login.get_qr_code()
+            webbrowser.open(qr_url)
+
+    def destroy(self):
+        self._stop = True
+        super().destroy()
 
     def _save_cookies_persistent(self, api):
         try:
@@ -568,18 +649,8 @@ class QrLoginDialog(ctk.CTkToplevel):
                     })
             if cookie_dicts:
                 auth._save_cookies(cookie_dicts)
-        except Exception as e:
+        except Exception:
             pass
-
-    def _open_browser(self):
-        import webbrowser
-        if self._api_login:
-            _, qr_url = self._api_login.get_qr_code()
-            webbrowser.open(qr_url)
-
-    def destroy(self):
-        self._stop = True
-        super().destroy()
 
 
 class SourceDialog(ctk.CTkToplevel):
@@ -611,14 +682,17 @@ class SourceDialog(ctk.CTkToplevel):
         self.recursive_var = ctk.BooleanVar(value=source.recursive if source else True)
         ctk.CTkCheckBox(self, text="递归子目录", variable=self.recursive_var).grid(row=2, column=1, padx=15, pady=5, sticky="w")
 
-        ctk.CTkLabel(self, text="排除模式 (每行一个, glob):").grid(row=3, column=0, padx=15, pady=(10, 5), sticky="nw")
+        self.delete_var = ctk.BooleanVar(value=source.delete_after_backup if source else False)
+        ctk.CTkCheckBox(self, text="备份后删除原文件", variable=self.delete_var).grid(row=3, column=1, padx=15, pady=5, sticky="w")
+
+        ctk.CTkLabel(self, text="排除模式 (每行一个, glob):").grid(row=4, column=0, padx=15, pady=(10, 5), sticky="nw")
         self.exclude_text = ctk.CTkTextbox(self, width=350, height=80)
-        self.exclude_text.grid(row=3, column=1, padx=15, pady=(10, 5))
+        self.exclude_text.grid(row=4, column=1, padx=15, pady=(10, 5))
         if source:
             self.exclude_text.insert("1.0", "\n".join(source.exclude))
 
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.grid(row=4, column=1, pady=15)
+        btn_frame.grid(row=5, column=1, pady=15)
         ctk.CTkButton(btn_frame, text="确定", command=self._confirm).pack(side="left", padx=5)
         ctk.CTkButton(btn_frame, text="取消", command=self.destroy).pack(side="left", padx=5)
 
@@ -646,6 +720,7 @@ class SourceDialog(ctk.CTkToplevel):
             remote=remote,
             exclude=exclude,
             recursive=self.recursive_var.get(),
+            delete_after_backup=self.delete_var.get(),
         )
         self.destroy()
 
