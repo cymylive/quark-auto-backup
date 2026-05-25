@@ -1,4 +1,4 @@
-<img width="1127" height="851" alt="image" src="https://github.com/user-attachments/assets/5266316d-0d80-4a32-8681-753cb2bfb9a7" /># 夸克自动备份
+# 夸克自动备份
 
 定时将本地文件夹自动备份到夸克网盘。支持 **GUI 桌面端** 和 **CLI 命令行** 两种模式。
 
